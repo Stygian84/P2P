@@ -6,7 +6,7 @@ from socket import *
 import pickle
 
 # x11: I'm the connection server, sending you the new sp the list of all sp_ips
-# x12: I'm the connection server sending you a new ip
+# x12: I'm a superpeer going to close now, remove from your sp_ip list
 
 input_lock = threading.Lock()
 
@@ -20,36 +20,42 @@ class Superpeer:
     def __init__(self):
         sock = socket(AF_INET, SOCK_STREAM) # listening socket
         connecting_sock = socket(AF_INET, SOCK_STREAM)
-        input_lock.acquire()
-        self.ip = input('Enter new address: ')
-        input_lock.release()
-        if self.ip == 'exit':
-            sys.exit()
-        try:
-            sock.bind((self.ip, 60000))
-            connecting_sock.bind((self.ip, 60001))
-            print(f'listening socket binded at {self.ip}, port 60000')
-            print(f'connecting socket binded at {self.ip}, port 60001')
-        except Exception as e:
-            print('bind error: ', e)
-        print('sockname: ', sock.getsockname())
-        sock.listen(1)
 
-        # connect to connection_server (preset 127.0.0.1)
-        if self.ip != '127.0.0.1':
+        while True:
+            input_lock.acquire()
+            inputt = input('Enter new address: ')
+            input_lock.release()
+            if inputt == 'exit':
+                for c in self.sp_connections:
+                    print('please delete me: ', self.ip)
+                    c.send(b'\x12' + bytes(self.ip, "utf-8"))
+                sys.exit()
+            else:
+                self.ip = inputt
             try:
-                connecting_sock.connect(("127.0.0.1", 60000))
-                self.sp_ips.append("127.0.0.1")
-                self.sp_connections.append(connecting_sock)
-                print(connecting_sock.getsockname())
-                print(f'connecting socket succesfully binded to connection server \n')
-                threading.Thread(daemon=True, target=self.rcvMsgHandler, args=(connecting_sock, )).start()
-
+                sock.bind((self.ip, 60000))
+                connecting_sock.bind((self.ip, 60001))
+                print(f'listening socket binded at {self.ip}, port 60000')
+                print(f'connecting socket binded at {self.ip}, port 60001')
             except Exception as e:
-                print('establish contact exception: ', e)
+                print('bind error: ', e)
+            print('sockname: ', sock.getsockname())
+            sock.listen(1)
 
-        threading.Thread(daemon=True, target=self.sendMsg,).start()
-        threading.Thread(daemon=True, target=self.connectionHandler, args=(sock, )).start()
+            # connect to connection_server (preset 127.0.0.1)
+            if self.ip != '127.0.0.1':
+                try:
+                    connecting_sock.connect(("127.0.0.1", 60000))
+                    self.sp_ips.append("127.0.0.1")
+                    self.sp_connections.append(connecting_sock)
+                    print(f'connecting socket succesfully binded to connection server \n')
+                    threading.Thread(daemon=True, target=self.rcvMsgHandler, args=(connecting_sock, )).start()
+
+                except Exception as e:
+                    print('establish contact exception: ', e)
+
+            threading.Thread(daemon=True, target=self.sendMsg,).start()
+            threading.Thread(daemon=True, target=self.connectionHandler, args=(sock, )).start()
         
     def sendMsg(self):
         input_lock.acquire()
@@ -66,6 +72,9 @@ class Superpeer:
                 elif msg == "print connections":
                     print(len(self.sp_connections))
                     continue
+                elif msg == "myip":
+                    print(self.ip)
+                    continue
             except Exception as e:
                 print(e)
             data = bytes(msg, "utf-8")
@@ -75,8 +84,7 @@ class Superpeer:
                 connection.send(data)
 
     def connectionHandler(self, sock):
-        print('connectionHandler')
-        print(self.ip)
+        print('connectionHandler for ', self.ip)
         # if ip == '127.0.0.1':
         while True:
             try:
@@ -91,12 +99,7 @@ class Superpeer:
                     self.sp_ips.append(addr[0])
                     threading.Thread(daemon=True, target=self.rcvMsgHandler, args=(c, )).start()
                     # send the new sp self.sp_ips
-                    print('sending x11, ', self.sp_ips)
                     c.send(b'\x11' + pickle.dumps(self.sp_ips))
-                    # update connected sps with new addr
-                    print('BROADCASTING')
-                    for connection in self.sp_connections:
-                        connection.send(b'\x12'+bytes(addr[0], 'utf-8'))
                 elif self.ip != '127.0.0.1' and incoming_ip not in self.sp_ips:
                     print(f'incoming connection from {incoming_ip}\n')
                     self.sp_connections.append(c)
@@ -111,7 +114,6 @@ class Superpeer:
         while True:
             data = bytes([])
             if not isinstance(c, socket):
-                print('not isinstance')
                 return 
             try:
                 data = c.recv(1024)
@@ -120,30 +122,41 @@ class Superpeer:
                 break
             if data[0:1] == b'\x11' and self.ip != '127.0.0.1':
                 sp_ips = pickle.loads(data[1:])
-                print('x11 list: ', sp_ips)
                 union = self.sp_ips + sp_ips
                 union = list(set(union)) # removes duplicates
                 union.remove(self.ip)
                 self.sp_ips = sorted(union)
-            if data[0:1] == b'\x12' and self.ip != '127.0.0.1':
-                ip = data[1:].decode()
-                print("x12: ", ip)
-                if ip not in self.sp_ips and ip != self.ip:
-                    self.sp_ips.append(ip)
-                    sock = socket(AF_INET, SOCK_STREAM)
+                # make connections to all non cs sps
+                for ip in self.sp_ips[1:]:
+                    s = socket(AF_INET, SOCK_STREAM)
+                    s.bind((self.ip, 0))
                     try:
-                        sock.connect((ip, 60000))
-                        threading.Thread(daemon=True, target=self.rcvMsgHandler, args=(sock, )).start()
+                        print(self.ip , 'attempting to connect to ', ip)
+                        s.connect((ip, 60000))
+                        threading.Thread(daemon=True, target=self.rcvMsgHandler, args=(s, )).start()
+                        self.sp_connections.append(s)
                     except Exception as e:
                         print('connecting sps', e)
-                    self.sp_connections.append(sock)
+
+            elif data[0:1] == b'\x12':
+                ip_to_remove = data[1:].decode()
+                self.sp_ips.remove(ip_to_remove)
+                for c in self.sp_connections:
+                    print(c.getpeername(), ip_to_remove)
+                    if c.getpeername()[0] == ip_to_remove:
+                        self.sp_connections.remove(c)
+            
             elif data and data[0:1] != b'\x11' and data[0:1] != b'\x12':
                 # time.sleep(2)
                 print(str(data, "utf-8"))
 
-while True:
-    try: 
-        sp = Superpeer()
-    except Exception as e:
-            print(e)
+# while True:
+#     try: 
+#         sp = Superpeer()
+#     except Exception as e:
+#             print(e)
 
+try: 
+    sp = Superpeer()
+except Exception as e:
+        print(e)
